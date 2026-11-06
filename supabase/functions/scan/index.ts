@@ -144,5 +144,13 @@ Deno.serve(async (req) => {
       }
     }
   }
+  // refund Verity credits for checks that failed
+  const failed = out.filter((x) => x.status === "error").length;
+  if (cost && failed) {
+    const refund = Math.round((cost / kinds.length) * failed);
+    const { data: p } = await db.from("profiles").select("credits").eq("id", user.id).single();
+    await db.from("profiles").update({ credits: (p?.credits ?? 0) + refund }).eq("id", user.id);
+    await db.from("usage_records").insert({ user_id: user.id, provider: det.name, action: "refund:failed-scan", words, credits: -refund });
+  }
   return json(out.map(({ secret: _s, scan_text: _t, spans: _sp, raw: _r, ...rest }) => rest));
 });

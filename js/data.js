@@ -96,7 +96,11 @@ export async function listDocs() {
   if (!docs.length) return [];
   const vids = docs.map((d) => d.current_version_id).filter(Boolean);
   const versions = check(await sb.from("versions").select("id, number, stats").in("id", vids));
-  const findings = check(await sb.from("findings").select("version_id").in("version_id", vids).eq("state", "open"));
+  const docScans = check(await sb.from("scans").select("id, kind, status, document_id, created_at").in("document_id", docs.map((d) => d.id)).eq("status", "done").order("created_at", { ascending: false }));
+  const valid = new Set();
+  const seen = new Set();
+  for (const sc of docScans) { const k = sc.document_id + sc.kind; if (!seen.has(k)) { seen.add(k); valid.add(sc.id); } }
+  const findings = check(await sb.from("findings").select("version_id, scan_id").in("version_id", vids).eq("state", "open")).filter((f) => valid.has(f.scan_id));
   const vm = Object.fromEntries(versions.map((v) => [v.id, v]));
   return docs.filter((d) => vm[d.current_version_id]).map((d) => ({ ...d, version: vm[d.current_version_id].number, stats: vm[d.current_version_id].stats,
     open_findings: findings.filter((f) => f.version_id === d.current_version_id).length }));
@@ -130,8 +134,12 @@ export async function report(docId) {
   const scans = check(await sb.from("scans").select("id, kind, provider, mode, status, message, summary, words, version_id, created_at, finished_at").eq("document_id", docId).order("created_at", { ascending: false }));
   const latest = {};
   for (const s of scans) if (!latest[s.kind]) latest[s.kind] = s;
-  const findings = check(await sb.from("findings").select("*").eq("version_id", version.id)).map(normF);
-  const scanIds = [...new Set(findings.map((f) => f.scan_id).concat(Object.values(latest).map((s) => s.id)))];
+  // only findings from the latest completed scan of each kind count; older scans (e.g. sample mode) are history
+  const latestDone = {};
+  for (const sc of scans) if (sc.status === "done" && !latestDone[sc.kind] && sc.mode === latest[sc.kind].mode) latestDone[sc.kind] = sc.id;
+  const valid = new Set(Object.values(latestDone));
+  const findings = check(await sb.from("findings").select("*").eq("version_id", version.id)).map(normF).filter((f) => valid.has(f.scan_id));
+  const scanIds = [...valid];
   const srcs = scanIds.length ? check(await sb.from("sources").select("*").in("scan_id", scanIds)) : [];
   const sm = Object.fromEntries(srcs.map((s) => [s.id, s]));
   const rows = {};

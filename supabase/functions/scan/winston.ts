@@ -18,7 +18,10 @@ async function call(path: string, body: unknown) {
   try { data = JSON.parse(text); } catch { /* not json */ }
   if (!r.ok) {
     const msg = data?.description || data?.error || text.slice(0, 300);
-    if (r.status === 402) throw new Error("Winston AI has no credits left on the account. Top up credits in the Winston developer dashboard.");
+    if (r.status === 402 || text.includes("INSUFFICIENT_CREDIT")) {
+      const need = text.match(/cost (\d+) credits/), have = text.match(/have (\d+) credits/);
+      throw new Error(`Not enough Winston AI credits for this check${need ? ` (needs ${need[1]}, ${have ? have[1] : "fewer"} left)` : ""}. Top up at dev.gowinston.ai/billing, or scan a shorter document.`);
+    }
     throw new Error(`Winston AI ${path} failed (${r.status}): ${msg}`);
   }
   return data;

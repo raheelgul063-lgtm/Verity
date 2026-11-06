@@ -1,0 +1,10 @@
+project_id = "btyeujbewductabgbqhb"
+
+[functions.scan]
+verify_jwt = false
+
+[functions.copyleaks-webhook]
+verify_jwt = false
+
+[functions.rewrite]
+verify_jwt = true

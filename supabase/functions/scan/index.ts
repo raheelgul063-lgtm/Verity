@@ -2,13 +2,17 @@
 // verify_jwt is off so the public "status" action works; every other action checks the user token itself.
 import { admin, AI_CHUNK, buildScanText, cfg, chunks, claudeMode, copyleaksMode, CORS, detectAI, json, locate,
   samplePlagiarism, storePlagFindings, submitPlagiarism, userFrom } from "./shared.ts";
+import { winstonAI, winstonEnabled, winstonPlagiarism, WINSTON_AI_MIN } from "./winston.ts";
+
+// Detection provider: Winston AI if its key is set, else Copyleaks, else clearly labelled sample data.
+const detector = () => (winstonEnabled() ? { name: "Winston AI", mode: "live" } : copyleaksMode() === "sample" ? { name: "Sample data (no detector key)", mode: "sample" } : { name: "Copyleaks", mode: copyleaksMode() });
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   const db = admin();
   let body: any = {};
   try { body = await req.json(); } catch { /* empty */ }
-  if (body.action === "status") return json({ copyleaks: copyleaksMode(), claude: claudeMode(), claude_model: claudeMode() === "live" ? cfg.anthropicModel : null });
+  if (body.action === "status") { const d = detector(); return json({ detector: d.name, detector_mode: d.mode, copyleaks: d.mode, claude: claudeMode(), claude_model: claudeMode() === "live" ? cfg.anthropicModel : null }); }
 
   const user = await userFrom(req, db);
   if (!user) return json({ error: "Please log in." }, 401);
@@ -17,10 +21,12 @@ Deno.serve(async (req) => {
 
   if (body.action === "rescan") {
     const text: string = body.text || "";
-    if (copyleaksMode() === "sample") return json({ status: "sample", message: "Sample mode: no real re-check. Add Copyleaks keys." });
-    if (text.length < 255) return json({ status: "too_short", message: "Passage is too short for a separate AI re-check (Copyleaks needs 255+ characters). Run a full re-scan." });
+    const d = detector();
+    if (d.mode === "sample") return json({ status: "sample", message: "Sample mode: no real re-check. Add a detector key." });
+    const min = winstonEnabled() ? WINSTON_AI_MIN : 255;
+    if (text.length < min) return json({ status: "too_short", message: `Passage is too short for a separate AI re-check (${d.name} needs ${min}+ characters). Run a full re-scan.` });
     try {
-      const r = await detectAI(text, [[0, text]], `re${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`);
+      const r = winstonEnabled() ? await winstonAI(text) : await detectAI(text, [[0, text]], `re${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`);
       return json({ status: "done", flagged: r.sections.length > 0, ai_share: r.docAI, provider: r.provider, mode: r.mode });
     } catch (e) { return json({ status: "error", message: String((e as Error).message) }); }
   }
@@ -28,7 +34,8 @@ Deno.serve(async (req) => {
   if (body.action !== "start") return json({ error: "Unknown action." }, 400);
   const kinds: string[] = (body.kinds || []).filter((k: string) => k === "ai" || k === "plagiarism");
   if (!kinds.length) return json({ error: "Choose ai and/or plagiarism." }, 400);
-  const mode = copyleaksMode();
+  const det = detector();
+  const mode = det.mode;
   if (mode !== "sample" && !profile.consent_external_ai) return json({ error: "consent_required" }, 428);
 
   const { data: doc } = await db.from("documents").select("*").eq("id", body.document_id).eq("user_id", user.id).is("deleted_at", null).single();
@@ -41,9 +48,9 @@ Deno.serve(async (req) => {
   if (cost && profile.credits < cost) return json({ error: `This scan needs ${cost} credits, you have ${profile.credits}.` }, 402);
   if (cost) {
     await db.from("profiles").update({ credits: profile.credits - cost }).eq("id", user.id);
-    await db.from("usage_records").insert({ user_id: user.id, provider: "Copyleaks", action: "scan:" + kinds.join("+"), words, credits: cost });
+    await db.from("usage_records").insert({ user_id: user.id, provider: det.name, action: "scan:" + kinds.join("+"), words, credits: cost });
   }
-  const provider = mode === "sample" ? "Sample data (no Copyleaks key)" : "Copyleaks";
+  const provider = det.name;
   const { data: scans } = await db.from("scans").insert(kinds.map((kind) => ({
     document_id: doc.id, version_id: version!.id, user_id: user.id, kind, provider, mode, status: "running",
     scan_text: st.text, spans: st.spans, words,
@@ -54,8 +61,8 @@ Deno.serve(async (req) => {
   for (const scan of scans!) {
     if (scan.kind === "ai") {
       try {
-        const r = await detectAI(st.text, chunks(st.text, st.spans, AI_CHUNK), scan.id.replaceAll("-", ""));
-        const merged = new Map<string, any>();
+        const r = winstonEnabled() ? await winstonAI(st.text) : await detectAI(st.text, chunks(st.text, st.spans, AI_CHUNK), scan.id.replaceAll("-", ""));
+        const perEl = new Map<string, any[]>();
         for (const sec of r.sections) {
           for (let [id, a, b] of locate(st.spans, sec.start, sec.length)) {
             const piece = els[id].text.slice(a, b);
@@ -64,8 +71,20 @@ Deno.serve(async (req) => {
             b -= piece.length - piece.trimEnd().length;
             const phrases: [number, number][] = [];
             for (const [ps, pl] of sec.phrases) for (const [pid, pa, pb] of locate(st.spans, ps, pl)) if (pid === id) phrases.push([pa, pb]);
-            merged.set(`${id}|${a}|${b}`, { id, a, b, prob: sec.probability, phrases });
+            if (!perEl.has(id)) perEl.set(id, []);
+            perEl.get(id)!.push({ id, a, b, prob: sec.probability, phrases });
           }
+        }
+        // join neighbouring flagged sentences in the same paragraph into one finding
+        const merged = new Map<string, any>();
+        for (const [id, list] of perEl) {
+          list.sort((x, y) => x.a - y.a);
+          let cur: any = null;
+          for (const m of list) {
+            if (cur && m.a <= cur.b + 3) { cur.b = Math.max(cur.b, m.b); cur.prob = cur.prob == null ? m.prob : Math.max(cur.prob, m.prob ?? 0); cur.phrases.push(...m.phrases); }
+            else { if (cur) merged.set(`${id}|${cur.a}`, cur); cur = { ...m, phrases: [...m.phrases] }; }
+          }
+          if (cur) merged.set(`${id}|${cur.a}`, cur);
         }
         const rows = [...merged.values()].map((m) => ({
           document_id: doc.id, version_id: version!.id, scan_id: scan.id, user_id: user.id, type: "ai", element_id: m.id,
@@ -76,6 +95,24 @@ Deno.serve(async (req) => {
         const upd = { status: "done", finished_at: new Date().toISOString(), summary: { ai_share: r.docAI, flagged_sections: rows.length, model_version: r.model }, raw: { responses: r.raw } };
         await db.from("scans").update(upd).eq("id", scan.id);
         out.push({ ...scan, ...upd, raw: undefined });
+      } catch (e) {
+        const upd = { status: "error", message: String((e as Error).message).slice(0, 500), finished_at: new Date().toISOString() };
+        await db.from("scans").update(upd).eq("id", scan.id);
+        out.push({ ...scan, ...upd });
+      }
+    } else if (winstonEnabled()) {
+      try {
+        const w = await winstonPlagiarism(st.text);
+        const srcIds: Record<string, string> = {};
+        for (const s of w.sources) {
+          const { data: row } = await db.from("sources").insert({ scan_id: scan.id, user_id: user.id, provider_result_id: s.id, title: s.title, url: s.url,
+            introduction: s.introduction, matched_words: s.matchedWords, author: s.author || "", publish_date: s.date || "" }).select("id").single();
+          srcIds[s.id] = row!.id;
+        }
+        await storePlagFindings(db, scan, w.matches, srcIds);
+        const upd = { status: "done", finished_at: new Date().toISOString(), summary: w.summary, raw: { responses: w.raw }, message: w.sources.length ? "" : "No matching sources found." };
+        await db.from("scans").update(upd).eq("id", scan.id);
+        out.push({ ...scan, ...upd });
       } catch (e) {
         const upd = { status: "error", message: String((e as Error).message).slice(0, 500), finished_at: new Date().toISOString() };
         await db.from("scans").update(upd).eq("id", scan.id);

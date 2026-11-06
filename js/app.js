@@ -60,7 +60,7 @@ function renderChips() {
   const st = S.status;
   const c = (label, mode, title) => `<span class="chip ${mode}" title="${esc(title)}">${label}: ${mode}</span>`;
   $("#provChips").innerHTML =
-    c("Copyleaks", st.copyleaks, st.copyleaks === "sample" ? "No Copyleaks keys: findings are SAMPLE data, not detection." : st.copyleaks === "sandbox" ? "Copyleaks sandbox returns mock results for free testing." : "Live Copyleaks detection") + " " +
+    c(st.copyleaks === "sample" ? "Detector" : (st.detector || "Copyleaks"), st.copyleaks, st.copyleaks === "sample" ? "No detector key: findings are SAMPLE data, not detection." : st.copyleaks === "sandbox" ? "Sandbox returns mock results for free testing." : `Live detection by ${st.detector || "Copyleaks"}`) + " " +
     c("Claude", st.claude, st.claude === "sample" ? "No Anthropic key: rewrites return the text unchanged." : `Model ${st.claude_model}`) + " " +
     (st.unreachable ? '<span class="chip sample" title="Could not reach the Verity server functions">offline</span> ' : "");
 }
@@ -198,7 +198,7 @@ function renderSummary() {
     <div class="metric"><div class="k">Matched sources</div><div class="v">${r.sources.length}</div><div class="s">${r.sources[0] ? esc(r.sources[0].title).slice(0, 40) : "none"}</div></div>
     <div class="metric"><div class="k">Need citation</div><div class="v">${open.filter(needsCitation).length}</div><div class="s">${F().filter((f) => f.state === "reviewed").length} reviewed · ${F().filter((f) => f.state === "fixed" || f.state === "fixed_pending").length} fixed</div></div>
     <div class="metric"><div class="k">Coverage</div><div class="v">${cov === null ? "n/a" : cov + "%"}</div><div class="s">${scanned ? scanned.toLocaleString() + " words scanned" : "Reference list excluded"}</div></div>
-    <div class="warnline"><strong>Read results with care.</strong> AI detection is probabilistic and is not proof of authorship. Formal, technical, non-native and highly standardised academic writing can be flagged wrongly. Similarity is not plagiarism: quoted and cited material and common phrases also match. ${S.status.copyleaks === "sample" ? "<br><strong>Sample mode:</strong> no Copyleaks keys are set, so findings are placeholders to test the workflow." : ""}${S.status.copyleaks === "sandbox" ? "<br><strong>Copyleaks sandbox:</strong> results are mock data from Copyleaks, not a real detection." : ""}</div>`;
+    <div class="warnline"><strong>Read results with care.</strong> AI detection is probabilistic and is not proof of authorship. Formal, technical, non-native and highly standardised academic writing can be flagged wrongly. Similarity is not plagiarism: quoted and cited material and common phrases also match. ${S.status.copyleaks === "sample" ? "<br><strong>Sample mode:</strong> no detector key is set, so findings are placeholders to test the workflow." : ""}${S.status.copyleaks === "sandbox" ? "<br><strong>Copyleaks sandbox:</strong> results are mock data from Copyleaks, not a real detection." : ""}</div>`;
 }
 function renderLeft() {
   const r = S.report, n = r.version.stats.locations, label = r.version.stats.location_label;
@@ -570,7 +570,7 @@ function settingsModal() {
 function askConsent() {
   return new Promise((resolve) => {
     const o = modal(`<header><h3>Send text to external AI providers?</h3></header><div class="body">
-      <p class="note" style="font-size:13.5px">To analyse and fix your document, Verity sends its text to <strong>Copyleaks</strong> (AI and plagiarism detection) and <strong>Anthropic Claude</strong> (rewrites). They process it under their API terms. Verity does not use your documents to train models. You can delete a document and its versions at any time.</p></div>
+      <p class="note" style="font-size:13.5px">To analyse and fix your document, Verity sends its text to <strong>${esc(S.status.detector || "the detection provider")}</strong> (AI and plagiarism detection) and <strong>Anthropic Claude</strong> (rewrites). They process it under their API terms. Verity does not use your documents to train models. You can delete a document and its versions at any time.</p></div>
       <footer><div class="spacer"></div><button class="btn ghost" id="cNo">Cancel</button><button class="btn primary" id="cYes">I agree</button></footer>`);
     $("#cNo", o).onclick = () => { o.remove(); resolve(false); };
     $("#cYes", o).onclick = async () => { await D.giveConsent(); S.me.consent_external_ai = true; o.remove(); resolve(true); };

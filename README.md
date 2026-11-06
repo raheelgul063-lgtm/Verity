@@ -10,7 +10,7 @@ Live: https://raheelgul063-lgtm.github.io/verity/
 * **Editing engine**: `js/engine.js` runs in the browser. It opens the DOCX/PPTX with JSZip, changes text inside the runs of one paragraph, copies every other file part unchanged, and refuses the edit if anything else changed.
 * **Supabase** (project `btyeujbewductabgbqhb`): login, database with row-level security (each user sees only their own rows), private storage bucket for document versions.
 * **Edge functions** (`supabase/functions/`):
-  * `scan`: AI detection (Copyleaks, synchronous) and plagiarism submission; also the AI re-check after a fix and the provider status.
+  * `scan`: AI detection and plagiarism (Winston AI, synchronous; Copyleaks as fallback); also the AI re-check after a fix and the provider status.
   * `copyleaks-webhook`: receives Copyleaks plagiarism results, exports matched passages, maps them to paragraphs.
   * `rewrite`: Claude rewrites with protected citations, links, quotes and formatted terms.
 
@@ -20,7 +20,8 @@ API keys live only in Supabase secrets, never in this repo or the browser.
 
 | Secret | Value |
 | --- | --- |
-| `COPYLEAKS_EMAIL` | your Copyleaks account email |
+| `WINSTON_API_KEY` | Winston AI API key (dev.gowinston.ai). When set, Winston is used for AI and plagiarism |
+| `COPYLEAKS_EMAIL` | optional fallback provider: Copyleaks account email |
 | `COPYLEAKS_API_KEY` | Copyleaks API key |
 | `COPYLEAKS_SANDBOX` | `true` for free mock results, `false` for real scans |
 | `ANTHROPIC_API_KEY` | Anthropic API key |

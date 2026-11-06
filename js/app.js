@@ -1,9 +1,11 @@
 /* Verity AI web app. Plain JS modules, hosted on GitHub Pages, data in Supabase. */
 import * as D from "./data.js";
+import * as P from "./preview.js";
 const S = {
   me: null, status: null, report: null, docId: null,
   filter: "all", loc: null, sel: null, right: "detail", proposal: null, manual: null, lastResult: null,
   fixScope: "both",
+  view: localStorage.getItem("verity_view") || "design",
   opts: JSON.parse(localStorage.getItem("verity_opts") || "null") || { mode: "clarity", writing_level: "postgraduate", citation_style: "APA 7", plag_action: "paraphrase" },
   poll: null, busy: false,
 };
@@ -220,7 +222,29 @@ function findingRow(f) {
     <div><div class="t">${esc(f.text)}</div><div class="m">${f.type === "ai" ? "AI" : "Similarity"} · ${lab} ${f.location}${f.state !== "open" ? ` · <span class="state ${f.state}">${STATE_LABEL[f.state]}</span>` : ""}${needsCitation(f) && f.state === "open" ? ' · <span class="state">no citation</span>' : ""}</div></div>
     <div class="sc" style="color:${color(f)}">${sc}</div></div>`;
 }
+function viewToggle() {
+  return `<div class="viewbar"><div class="seg" id="viewSeg"><button data-v="design" class="${S.view === "design" ? "on" : ""}">Design view</button><button data-v="text" class="${S.view === "text" ? "on" : ""}">Text view</button></div>
+    <span class="note">${S.view === "design" ? "Your file as it looks. Highlights show flagged passages." : "Plain text with protected citations and links marked."}</span><span class="note" id="placeNote"></span></div>`;
+}
 function renderCenter() {
+  if (S.view === "design") return viewToggle() + `<div id="designHost"><div class="empty"><span class="spin"></span> Rendering your document with its original design...</div></div>`;
+  return viewToggle() + renderTextPages();
+}
+async function mountDesign() {
+  const host = $("#designHost");
+  if (!host) return;
+  const r = S.report;
+  let node;
+  try { node = await P.mount(host, r, D.versionBlob); }
+  catch (e) { host.innerHTML = `<div class="empty">Design view could not render this file (${esc(e.message)}). Showing the text view instead.</div>` + renderTextPages(); return; }
+  if (!node || !$("#designHost")) return;
+  const missing = P.highlight(node, F().filter((f) => f.state !== "stale"), S.sel, r.document.format);
+  const note = $("#placeNote");
+  if (note) note.textContent = missing.length ? ` ${missing.length} finding${missing.length === 1 ? "" : "s"} could not be placed on the design; they are in the list and in Text view.` : "";
+  if (S.sel) P.setSelected(node, S.sel, false);
+  if (S.loc) P.scrollToLocation(node, r.document.format, S.loc);
+}
+function renderTextPages() {
   const r = S.report, slide = r.version.stats.location_label === "slide";
   const byLoc = {};
   r.elements.forEach((e) => (byLoc[e.location] = byLoc[e.location] || []).push(e));
@@ -402,14 +426,26 @@ function bindWS() {
   $("#locClear") && ($("#locClear").onclick = () => { S.loc = null; renderWS(); });
   app.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => { S.filter = b.dataset.f; renderWS(); }));
   app.querySelectorAll(".finding").forEach((el) => (el.onclick = () => select(el.dataset.id, true)));
-  $("#center").onclick = (e) => { const m = e.target.closest("mark"); if (m) select(m.dataset.f, false); };
+  $("#center").onclick = (e) => {
+    const v = e.target.closest("[data-v]");
+    if (v) { S.view = v.dataset.v; localStorage.setItem("verity_view", S.view); renderWS(); return; }
+    const m = e.target.closest("mark"); if (m && m.dataset.f) select(m.dataset.f, false);
+  };
   bindRight();
+  if (S.view === "design") mountDesign();
 }
 function select(id, scroll) {
   S.sel = id; S.right = "detail";
   app.querySelectorAll(".finding").forEach((el) => el.classList.toggle("sel", el.dataset.id === id));
   app.querySelectorAll("mark.sel").forEach((m) => m.classList.remove("sel"));
   const f = findingById(id);
+  const design = app.querySelector("#designHost .design");
+  if (S.view === "design" && design) {
+    const ok = P.setSelected(design, id, scroll);
+    if (!ok && scroll && f) { P.scrollToLocation(design, S.report.document.format, f.location); toast("This passage could not be placed exactly on the design view. It is shown in the right panel and in Text view."); }
+    refreshRight();
+    return;
+  }
   const para = f && app.querySelector(`.para[data-el="${CSS.escape(f.element_id)}"]`);
   if (para) {
     const fs = F().filter((x) => x.element_id === f.element_id && x.state !== "stale");

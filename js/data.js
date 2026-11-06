@@ -48,7 +48,7 @@ export async function status() {
 
 /* ---------- files ---------- */
 const blobCache = new Map();
-async function versionBlob(v) {
+export async function versionBlob(v) {
   if (blobCache.has(v.id)) return blobCache.get(v.id);
   const data = check(await sb.storage.from(BUCKET).download(v.storage_path));
   const buf = new Uint8Array(await data.arrayBuffer());

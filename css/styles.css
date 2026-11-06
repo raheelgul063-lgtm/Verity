@@ -179,3 +179,22 @@ textarea.edit { width: 100%; min-height: 150px; line-height: 1.55; font-size: 13
   .cols { grid-template-columns: 1fr; }
   .left, .right { max-height: 40vh; }
 }
+
+/* design view */
+.viewbar { display: flex; align-items: center; gap: 10px; max-width: 1100px; margin: 0 auto 14px; flex-wrap: wrap; }
+.viewbar .seg button { font-size: 12.5px; padding: 5px 10px; }
+#designHost { max-width: 1100px; margin: 0 auto; }
+.design .pptx-preview-wrapper { height: auto !important; background: transparent !important; overflow: visible !important; }
+.design .pptx-preview-slide-wrapper { box-shadow: 0 1px 3px rgba(15, 27, 51, .12); border-radius: 3px; margin-bottom: 22px !important; }
+.design .page-label { max-width: none; margin: 0 0 6px; }
+.design-docx .docx-wrapper { background: transparent !important; padding: 0 !important; }
+.design-docx .docx-wrapper > section.docx { box-shadow: 0 1px 3px rgba(15, 27, 51, .12) !important; margin-bottom: 22px !important; }
+mark.vh { color: inherit; cursor: pointer; border-radius: 2px; background: transparent; }
+mark.vh.ai { background: rgba(123, 75, 214, .26); box-shadow: inset 0 -2px 0 #7b4bd6; }
+mark.vh.identical { background: rgba(210, 59, 59, .24); box-shadow: inset 0 -2px 0 #d23b3b; }
+mark.vh.minor_changes { background: rgba(224, 123, 31, .26); box-shadow: inset 0 -2px 0 #e07b1f; }
+mark.vh.paraphrased { background: rgba(196, 154, 0, .26); box-shadow: inset 0 -2px 0 #c49a00; }
+mark.vh.done { background: rgba(29, 138, 85, .2); box-shadow: inset 0 -2px 0 #1d8a55; }
+mark.vh.sel { outline: 2px solid #2f5bd3; outline-offset: 1px; }
+mark.vh.pulse { animation: vpulse 1.2s ease-out 1; }
+@keyframes vpulse { 0% { outline-width: 5px; } 100% { outline-width: 2px; } }

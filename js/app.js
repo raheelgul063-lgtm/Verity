@@ -90,7 +90,7 @@ function renderAuth(mode = "login") {
     } catch (e) { $("#aerr").textContent = e.message; }
   };
   $("#go").onclick = submit;
-  $("#pw").onkeydown = (e) => e.key === "Enter" && submit();
+  $("#pw").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
 }
 
 /* ---------------- dashboard ---------------- */

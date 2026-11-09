@@ -22,6 +22,10 @@ Rules you must follow:
 function task(b: any) {
   const lines: string[] = [];
   const src = b.source ? JSON.stringify(Object.fromEntries(Object.entries(b.source).filter(([, v]) => v))) : null;
+  if (b.scope === "citation") {
+    lines.push(`This passage matches an external source but has no citation. Do NOT change any existing word, its order or punctuation. Only insert one in-text citation in ${b.style} style at the end of the sentence that contains the matched words (before its final full stop), built ONLY from these source details: ${src}. If author or year are missing, use the title and 'n.d.'.`);
+    return lines.join("\n");
+  }
   if ((b.scope === "plagiarism" || b.scope === "both") && src) {
     lines.push(b.plag_action === "quote"
       ? `This passage matches an external source. Turn the matching words into a direct quotation and add an in-text citation in ${b.style} style built ONLY from these source details: ${src}. If author or year are missing, use the title and 'n.d.'.`

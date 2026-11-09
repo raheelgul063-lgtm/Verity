@@ -199,6 +199,7 @@ export function selectFindings(rep, { finding_ids, scope, level, location }) {
   else if (level === "page") items = items.filter((f) => f.location === location);
   else if (level !== "document") throw new AppError("Choose findings, a page/slide, or the whole document.");
   if (scope === "ai" || scope === "plagiarism") items = items.filter((f) => f.type === scope);
+  if (scope === "citation") items = items.filter((f) => f.type === "plagiarism" && !(f.citation_status?.cited || f.citation_status?.quoted));
   if (level === "paragraph" && finding_ids?.length) {
     const els = new Set(items.map((f) => f.element_id));
     items = rep.findings.filter((f) => f.state === "open" && els.has(f.element_id) && (scope === "both" || f.type === scope));
@@ -218,7 +219,7 @@ function sourceInfo(f) {
 
 export async function propose(rep, req, onProgress) {
   const findings = selectFindings(rep, req);
-  if (!findings.length) throw new AppError("No open findings match this selection.");
+  if (!findings.length) throw new AppError(req.scope === "citation" ? "No passages here are missing a citation." : "No open findings match this selection.");
   const { elements } = await currentParts(rep);
   const byId = Object.fromEntries(elements.map((e) => [e.id, e]));
   const groups = new Map();
@@ -241,6 +242,10 @@ export async function propose(rep, req, onProgress) {
     catch (e) { out.push(check(await sb.from("edits").insert({ ...base, start_pos: start, end_pos: end, status: "failed", error: e.message }).select("*").single())); continue; }
     const plag = fs.find((f) => f.type === "plagiarism");
     const scope = req.scope !== "both" ? req.scope : plag && fs.some((f) => f.type === "ai") ? "both" : fs[0].type;
+    if (scope === "citation" && !sourceInfo(plag)) {
+      out.push(check(await sb.from("edits").insert({ ...base, start_pos: start, end_pos: end, status: "failed", error: "The detector gave no source details for this match, so a citation cannot be built without guessing. Add it by hand." }).select("*").single()));
+      continue;
+    }
     const tokens = tpl.tokens.map((t) => ({ id: t.id, kind: t.kind, text: t.text }));
     let res = null, err = "";
     for (let attempt = 0; attempt < 2; attempt++) {

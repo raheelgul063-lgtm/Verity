@@ -400,6 +400,14 @@ async function openDoc(id, keep) {
   if (active) S.poll = setTimeout(() => location.hash.includes(id) && openDoc(id, true), 4000);
 }
 function F() { return S.report.findings; }
+const FIXES = {
+  ai: { btn: "Rewrite AI passages", what: "Rewrites only the passages flagged as AI writing, in your settings' style. Matches and citations are left alone.", pick: (f) => f.type === "ai" },
+  plagiarism: { btn: "Paraphrase + cite matches", what: "Paraphrases (or quotes) the matched words and adds an in-text citation to the source. AI flags are left alone.", pick: (f) => f.type === "plagiarism" },
+  citation: { btn: "Add citations only", what: "Keeps your wording exactly and only adds the missing in-text citation for the matched source.", pick: (f) => needsCitation(f) },
+};
+const openIn = (loc) => F().filter((f) => f.state === "open" && (loc == null || f.location === loc));
+const fixCount = (kind, loc) => openIn(loc).filter(FIXES[kind].pick).length;
+function scanned() { const sc = S.report.scans; return Object.values(sc).some((x) => x && x.status === "done"); }
 function findingById(id) { return F().find((f) => f.id === id); }
 function needsCitation(f) { return f.type === "plagiarism" && !(f.citation_status?.cited || f.citation_status?.quoted); }
 function visibleFindings() {
@@ -433,7 +441,7 @@ function renderWS() {
       <span class="note">Scan</span>
       <div class="seg" id="scanSeg"><button data-k="ai,plagiarism">Scan AI + plagiarism</button><button data-k="ai">AI only</button><button data-k="plagiarism">Plagiarism only</button></div>
       <span class="vsep"></span><span class="note">Fix</span>
-      <div class="seg" id="scopeSeg">${["ai", "plagiarism", "both"].map((s) => `<button data-s="${s}" class="${S.fixScope === s ? "on" : ""}">${s === "ai" ? "AI" : s === "plagiarism" ? "Plagiarism" : "Both"}</button>`).join("")}</div>
+      <div class="seg" id="scopeSeg">${[["both", "Everything"], ["ai", "AI only"], ["plagiarism", "Plagiarism only"], ["citation", "Citations only"]].map(([s, l]) => `<button data-s="${s}" class="${S.fixScope === s ? "on" : ""}">${l}</button>`).join("")}</div>
       <button class="btn accent" id="fixAll">Fix all with AI</button>
       <button class="btn" id="settingsBtn">Fix settings</button>
     </div>
@@ -482,16 +490,29 @@ function renderSummary() {
 }
 function renderLeft() {
   const r = S.report, n = r.version.stats.locations, label = r.version.stats.location_label;
-  const counts = {};
-  F().filter((f) => f.state === "open").forEach((f) => (counts[f.location] = (counts[f.location] || 0) + 1));
+  const per = {};
+  F().filter((f) => f.state === "open").forEach((f) => { const c = (per[f.location] = per[f.location] || { ai: 0, pl: 0 }); f.type === "ai" ? c.ai++ : c.pl++; });
+  const cnt = { all: openIn(null).length, ai: fixCount("ai"), plagiarism: fixCount("plagiarism"), citation: fixCount("citation"), fixed: F().filter((f) => ["fixed", "fixed_pending", "reviewed"].includes(f.state)).length };
   const tabs = [["all", "All"], ["ai", "AI"], ["plagiarism", "Plagiarism"], ["citation", "Needs citation"], ["fixed", "Fixed"]];
   const items = visibleFindings();
+  const Lab = label === "slide" ? "Slide" : "Page";
+  const where = S.loc ? `on ${label} ${S.loc}` : "in the document";
+  const fixBtns = (loc) => Object.keys(FIXES).map((k) => { const c = fixCount(k, loc); return `<button class="btn small fixk ${k}" data-fixk="${k}" ${c ? "" : "disabled"} title="${esc(FIXES[k].what)}">${FIXES[k].btn.replace(" passages", "").replace(" matches", "")} <b>${c}</b></button>`; }).join("");
+  // contextual bulk action for the active filter
+  const fk = ["ai", "plagiarism", "citation"].includes(S.filter) ? S.filter : null;
+  const fkN = fk ? fixCount(fk, S.loc) : 0;
+  const empty = !scanned() ? "No scan yet. Use Scan in the top bar to check this file."
+    : !F().length ? "Nothing flagged in the latest scan."
+    : S.filter === "citation" ? `No passages ${where} are missing a citation.` : S.filter === "fixed" ? "Nothing fixed yet." : `Nothing to show ${where} for this filter.`;
   return `
     <div class="sec"><h4>${label === "slide" ? "Slides" : "Pages (approx.)"}</h4><div class="locs">
-      ${Array.from({ length: n }, (_, i) => i + 1).map((i) => `<div class="loc" data-loc="${i}" style="${S.loc === i ? "border-color:var(--accent);background:var(--accent-soft)" : ""}">${i}<span class="n ${counts[i] ? "hot" : ""}">${counts[i] || 0}</span></div>`).join("")}
-    </div>${S.loc ? `<div class="actions"><button class="btn small" id="locFix">Fix ${label} ${S.loc} with AI</button><button class="btn small ghost" id="locClear">Show all</button></div>` : ""}</div>
-    <div class="sec"><div class="tabs">${tabs.map(([k, l]) => `<button data-f="${k}" class="${S.filter === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
-    ${items.length ? items.map(findingRow).join("") : `<div class="empty">${F().length ? "Nothing in this view." : "No findings yet. Run a scan from the top bar."}</div>`}
+      ${Array.from({ length: n }, (_, i) => i + 1).map((i) => { const c = per[i]; return `<div class="loc ${S.loc === i ? "on" : ""} ${c ? "hot" : ""}" data-loc="${i}" title="${Lab} ${i}${c ? `: ${c.ai} AI, ${c.pl} similarity` : ": nothing flagged"}">${i}<span class="n">${c ? `${c.ai ? `<i class="d ai"></i>${c.ai}` : ""}${c.pl ? `<i class="d pl"></i>${c.pl}` : ""}` : `<span class="ok">✓</span>`}</span></div>`; }).join("")}
+    </div>
+    ${S.loc ? `<div class="locfix"><div class="lf-h"><b>${Lab} ${S.loc}</b><button class="linkbtn" id="locClear">Show all ${label}s</button></div>
+      ${openIn(S.loc).length ? `<div class="lf-b">${fixBtns(S.loc)}</div><div class="note">Pick what to fix on this ${label}. Hover a button to see what it changes.</div>` : `<div class="note">Nothing flagged on this ${label}.</div>`}</div>` : `<div class="note" style="margin-top:8px">Click a ${label} to see and fix only that ${label}.</div>`}</div>
+    <div class="sec"><div class="tabs">${tabs.map(([k, l]) => `<button data-f="${k}" class="${S.filter === k ? "on" : ""}">${l}${cnt[k] ? ` <span class="tc">${cnt[k]}</span>` : ""}</button>`).join("")}</div>
+      ${fk && fkN ? `<button class="btn small accent wide" data-fixk="${fk}" style="margin-top:10px">${FIXES[fk].btn} ${where} (${fkN})</button><div class="note" style="margin-top:6px">${FIXES[fk].what}</div>` : ""}</div>
+    ${items.length ? items.map(findingRow).join("") : `<div class="empty">${empty}</div>`}
     ${r.sources.length ? `<div class="sec"><h4>Sources</h4>${r.sources.map((s) => `<div style="margin:6px 0;font-size:12.5px">${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a>` : esc(s.title || "Source details unavailable from provider")}<div class="note">${s.matched_words} matched words · ${s.passages} passage${s.passages === 1 ? "" : "s"}</div></div>`).join("")}</div>` : ""}`;
 }
 function color(f) { return f.type === "ai" ? "var(--ai)" : ({ identical: "var(--identical)", minor_changes: "var(--minor)", paraphrased: "var(--para)" }[f.match_type] || "var(--identical)"); }
@@ -573,15 +594,36 @@ function optsForm() {
     <div class="field"><label>Similarity fix</label>${sel("plag_action", [["paraphrase", "Paraphrase + cite"], ["quote", "Quote + cite"]])}</div>
   </div>`;
 }
+function renderGuide() {
+  const lbl = S.report.version.stats.location_label;
+  const has = scanned();
+  const row = (k) => { const c = fixCount(k); return `<div class="qf"><div><b>${FIXES[k].btn}</b><span class="qn">${c}</span><div class="note">${FIXES[k].what}</div></div><button class="btn small ${c ? "accent" : ""}" data-fixk="${k}" ${c ? "" : "disabled"}>${c ? "Fix " + c : "None"}</button></div>`; };
+  return `<div class="guide">
+    <h3>How to fix this file</h3>
+    <ol class="steps">
+      <li><b>Pick a passage</b> in the document or the list on the left to see why it was flagged, its score and the source.</li>
+      <li><b>Fix with AI</b> for that one passage, or use the quick fixes below for many at once. You review every change before it is applied.</li>
+      <li><b>Or edit it yourself</b> in the passage view. Either way only the flagged words change.</li>
+    </ol>
+    <h4>Quick fixes for the whole document</h4>
+    ${has ? Object.keys(FIXES).map(row).join("") : `<p class="note">Run a scan from the top bar first. Quick fixes appear here once something is flagged.</p>`}
+    <p class="note">To fix one ${lbl} only, click it in the ${lbl} grid on the left.</p>
+    <h4>Colour key</h4>
+    <div class="key">
+      <span><i style="background:${C.ai}"></i>AI writing</span><span><i style="background:${C.identical}"></i>Identical match</span>
+      <span><i style="background:${C.minor}"></i>Minor changes</span><span><i style="background:${C.para}"></i>Paraphrased</span>
+      <span><i style="background:${C.ok}"></i>Fixed</span><span><i class="dot" style="border-color:#2c6e49"></i>Citation, kept as is</span>
+    </div>
+    <p class="note safe">Your design, images, citations, links and every unflagged sentence stay exactly as they are. Each fix is checked before it is saved, and you can undo it from History.</p>
+  </div>`;
+}
 function renderRight() {
   if (S.right === "history") return renderHistory();
   if (S.right === "proposal" && S.proposal) return renderProposal();
   if (S.right === "manual" && S.manual) return renderManual();
   if (S.right === "result" && S.lastResult) return renderResult();
   const f = S.sel && findingById(S.sel);
-  if (!f) return `<div class="empty">Select a highlighted passage or a finding on the left to see why it was flagged and fix it.<br><br>
-    <span style="display:inline-block;text-align:left">
-    <mark class="ai">AI writing</mark><br><mark class="identical">Identical match</mark><br><mark class="minor_changes">Minor changes</mark><br><mark class="paraphrased">Paraphrased</mark><br><span class="cite">Protected citation</span> · <span class="lnk">link</span></span></div>`;
+  if (!f) return renderGuide();
   const lab = S.report.version.stats.location_label === "slide" ? "Slide" : "Page";
   const ev = f.evidence || {};
   let body = "";
@@ -613,7 +655,8 @@ function renderRight() {
     <div class="quote" style="margin-top:10px">${esc(f.text)}</div>
     ${body}
     ${f.state === "open" || f.state === "stale" ? `<div class="actions">
-      <button class="btn primary" id="aiFix">Fix with AI</button>
+      <button class="btn primary" id="aiFix">${f.type === "ai" ? "Rewrite with AI" : "Paraphrase + cite with AI"}</button>
+      ${needsCitation(f) ? `<button class="btn" id="citeFix" title="Keeps your wording and only adds the in-text citation">Add citation only</button>` : ""}
       <button class="btn" id="paraFix" title="Fixes every open finding in this paragraph">Fix whole paragraph</button>
       <button class="btn" id="manualBtn">Edit myself</button>
       <button class="btn ghost" id="reviewBtn">Mark reviewed</button></div>
@@ -707,9 +750,16 @@ function bindWS() {
     const loc = +el.dataset.loc; S.loc = S.loc === loc ? null : loc; renderWS();
     const page = app.querySelector(`.page[data-loc="${loc}"]`); page && page.scrollIntoView({ behavior: "smooth", block: "start" });
   }));
-  $("#locFix") && ($("#locFix").onclick = () => fix({ level: "page", location: S.loc, scope: S.fixScope }));
   $("#locClear") && ($("#locClear").onclick = () => { S.loc = null; renderWS(); });
   app.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => { S.filter = b.dataset.f; renderWS(); }));
+  // one handler for every "fix this kind" button (slide box, filter bar, guide panel)
+  app.querySelector(".cols").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-fixk]");
+    if (!b || b.disabled) return;
+    const inGuide = !!b.closest(".guide");
+    const page = !inGuide && S.loc;
+    fix(page ? { level: "page", location: S.loc, scope: b.dataset.fixk } : { level: "document", scope: b.dataset.fixk });
+  });
   app.querySelectorAll(".finding").forEach((el) => (el.onclick = () => select(el.dataset.id, true)));
   $("#center").onclick = (e) => {
     const v = e.target.closest("[data-v]");
@@ -749,6 +799,7 @@ function bindRight() {
   app.querySelectorAll("[data-o]").forEach((s) => (s.onchange = () => { S.opts[s.dataset.o] = s.value; saveOpts(); }));
   const f = S.sel && findingById(S.sel);
   on("aiFix", () => fix({ finding_ids: [f.id], level: "passage", scope: f.type }));
+  on("citeFix", () => fix({ finding_ids: [f.id], level: "passage", scope: "citation" }));
   on("paraFix", () => fix({ finding_ids: [f.id], level: "paragraph", scope: "both" }));
   on("manualBtn", () => manualStart(f));
   on("reviewBtn", async () => { await guarded(() => D.markReviewed(f.id)); toast("Marked as reviewed"); openDoc(S.docId, true); });
@@ -786,7 +837,7 @@ async function fix(req) {
   if (S.busy) return;
   S.busy = true;
   const body = { ...req, mode: S.opts.mode, writing_level: S.opts.writing_level, citation_style: S.opts.citation_style, plag_action: S.opts.plag_action };
-  const btns = app.querySelectorAll("#aiFix,#paraFix,#fixAll,#locFix,#regen");
+  const btns = app.querySelectorAll("#aiFix,#citeFix,#paraFix,#fixAll,#regen,[data-fixk]");
   btns.forEach((b) => { b.disabled = true; });
   const label = $("#right");
   if (req.level === "passage" || req.level === "paragraph") label.innerHTML = `<div class="empty"><span class="spin"></span> Writing a proposal...</div>`;

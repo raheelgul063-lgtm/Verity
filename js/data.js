@@ -24,9 +24,34 @@ export async function me() {
   const s = await session();
   if (!s) return null;
   const p = check(await sb.from("profiles").select("*").eq("id", s.user.id).maybeSingle());
-  return { id: s.user.id, email: s.user.email, credits: p?.credits ?? 0, consent_external_ai: !!p?.consent_external_ai };
+  return { id: s.user.id, email: s.user.email, credits: p?.credits ?? 0, consent_external_ai: !!p?.consent_external_ai,
+    full_name: p?.full_name || "", university: p?.university || "", study_level: p?.study_level || "", country: p?.country || "",
+    plan: p?.plan || "free", created_at: p?.created_at || s.user.created_at };
 }
 export async function giveConsent() { check(await sb.rpc("give_consent")); }
+export async function updateProfile(f) {
+  check(await sb.rpc("update_profile", { p_full_name: f.full_name, p_university: f.university, p_study_level: f.study_level, p_country: f.country }));
+  return true;
+}
+export async function changePassword(pw) { check(await sb.auth.updateUser({ password: pw })); return true; }
+export async function usage() { return check(await sb.from("usage_records").select("*").order("created_at", { ascending: false }).limit(50)); }
+
+/* Pasted text becomes a minimal, valid Word document so the same scan and fix tools work on it. */
+export async function textToDocx(title, text) {
+  const x = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const para = (t, heading) => `<w:p>${heading ? '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>' : ""}<w:r>${heading ? "<w:rPr><w:b/><w:sz w:val=\"32\"/></w:rPr>" : ""}<w:t xml:space="preserve">${x(t)}</w:t></w:r></w:p>`;
+  const paras = text.replace(/\r/g, "").split(/\n{2,}|\n/).map((t) => t.trim()).filter(Boolean);
+  const body = para(title, true) + paras.map((t) => para(t)).join("");
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
+  zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file("word/_rels/document.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  zip.file("word/styles.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr></w:style></w:styles>');
+  zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+  const blob = await zip.generateAsync({ type: "blob", mimeType: MIME.docx, compression: "DEFLATE" });
+  const safe = title.replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 60) || "Pasted text";
+  return new File([blob], `${safe}.docx`, { type: MIME.docx });
+}
 
 /* ---------- edge functions ---------- */
 async function fn(name, body) {
@@ -96,14 +121,23 @@ export async function listDocs() {
   if (!docs.length) return [];
   const vids = docs.map((d) => d.current_version_id).filter(Boolean);
   const versions = check(await sb.from("versions").select("id, number, stats").in("id", vids));
-  const docScans = check(await sb.from("scans").select("id, kind, status, document_id, created_at").in("document_id", docs.map((d) => d.id)).eq("status", "done").order("created_at", { ascending: false }));
+  const docScans = check(await sb.from("scans").select("id, kind, status, mode, summary, document_id, created_at").in("document_id", docs.map((d) => d.id)).eq("status", "done").order("created_at", { ascending: false }));
   const valid = new Set();
   const seen = new Set();
-  for (const sc of docScans) { const k = sc.document_id + sc.kind; if (!seen.has(k)) { seen.add(k); valid.add(sc.id); } }
+  const scores = {};
+  for (const sc of docScans) {
+    const k = sc.document_id + sc.kind;
+    if (seen.has(k)) continue;
+    seen.add(k); valid.add(sc.id);
+    const sm = sc.summary || {};
+    const v = sc.mode === "sample" ? "sample" : sc.kind === "ai" ? (sm.ai_share != null ? sm.ai_share * 100 : null) : (sm.aggregated ?? ((sm.identical || 0) + (sm.minor_changes || 0) + (sm.paraphrased || 0)));
+    (scores[sc.document_id] = scores[sc.document_id] || {})[sc.kind] = v;
+  }
   const findings = check(await sb.from("findings").select("version_id, scan_id").in("version_id", vids).eq("state", "open")).filter((f) => valid.has(f.scan_id));
   const vm = Object.fromEntries(versions.map((v) => [v.id, v]));
   return docs.filter((d) => vm[d.current_version_id]).map((d) => ({ ...d, version: vm[d.current_version_id].number, stats: vm[d.current_version_id].stats,
-    open_findings: findings.filter((f) => f.version_id === d.current_version_id).length }));
+    open_findings: findings.filter((f) => f.version_id === d.current_version_id).length,
+    ai: scores[d.id]?.ai, sim: scores[d.id]?.plagiarism, scanned: !!scores[d.id] }));
 }
 
 export async function deleteDoc(docId) {

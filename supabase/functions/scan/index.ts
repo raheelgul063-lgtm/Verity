@@ -44,7 +44,11 @@ Deno.serve(async (req) => {
   const st = buildScanText(version!.elements);
   if (!st.text.trim()) return json({ error: "No text found to scan." }, 422);
   const words = st.text.split(/\s+/).filter(Boolean).length;
-  const cost = mode === "live" ? Math.max(1, Math.ceil(words / 250)) * kinds.length : 0;
+  // 1 credit per 250 words for AI detection, 2 for plagiarism (it costs the provider twice as much)
+  const perKind: Record<string, number> = { ai: 1, plagiarism: 2 };
+  const units = Math.max(1, Math.ceil(words / 250));
+  const kindCost = (k: string) => (mode === "live" ? units * perKind[k] : 0);
+  const cost = kinds.reduce((n, k) => n + kindCost(k), 0);
   if (cost && profile.credits < cost) return json({ error: `This scan needs ${cost} credits, you have ${profile.credits}.` }, 402);
   if (cost) {
     await db.from("profiles").update({ credits: profile.credits - cost }).eq("id", user.id);
@@ -145,9 +149,8 @@ Deno.serve(async (req) => {
     }
   }
   // refund Verity credits for checks that failed
-  const failed = out.filter((x) => x.status === "error").length;
-  if (cost && failed) {
-    const refund = Math.round((cost / kinds.length) * failed);
+  const refund = out.filter((x) => x.status === "error").reduce((n, x) => n + kindCost(x.kind), 0);
+  if (cost && refund) {
     const { data: p } = await db.from("profiles").select("credits").eq("id", user.id).single();
     await db.from("profiles").update({ credits: (p?.credits ?? 0) + refund }).eq("id", user.id);
     await db.from("usage_records").insert({ user_id: user.id, provider: det.name, action: "refund:failed-scan", words, credits: -refund });

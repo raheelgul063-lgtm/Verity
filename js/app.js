@@ -4,17 +4,20 @@ import * as P from "./preview.js";
 const S = {
   me: null, status: null, report: null, docId: null,
   filter: "all", loc: null, sel: null, right: "detail", proposal: null, manual: null, lastResult: null,
-  fixScope: "both",
+  fixScope: "both", autoScan: null, newTab: "file", scanKinds: { ai: true, plagiarism: true },
   view: localStorage.getItem("verity_view") || "design",
   opts: JSON.parse(localStorage.getItem("verity_opts") || "null") || { mode: "clarity", writing_level: "postgraduate", citation_style: "APA 7", plag_action: "paraphrase" },
   poll: null, busy: false,
 };
 const $ = (s, r = document) => r.querySelector(s);
-const app = $("#app");
+const root = $("#root");
+let app = root;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (x) => (x === null || x === undefined ? "n/a" : `${Math.round(x * 100)}%`);
 const TYPE_LABEL = { ai: "AI writing", identical: "Identical", minor_changes: "Minor changes", paraphrased: "Paraphrased" };
 const STATE_LABEL = { open: "Open", fixed: "Fixed", fixed_pending: "Fixed, awaiting re-check", reviewed: "Reviewed", stale: "Needs re-scan" };
+const SUPPORT_EMAIL = "raheelgul063@gmail.com";
+const WORDS_PER_CREDIT = 250;
 
 function toast(msg, bad) {
   document.querySelectorAll(".toast").forEach((x) => x.remove());
@@ -35,48 +38,128 @@ async function guarded(fn) {
 }
 function saveOpts() { localStorage.setItem("verity_opts", JSON.stringify(S.opts)); }
 
-/* ---------------- boot ---------------- */
+/* ---------------- icons (inline, stroke) ---------------- */
+const I = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  files: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+  plans: '<path d="M3 7h18v10H3z"/><path d="M3 11h18"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/>',
+  out: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11"/>',
+  upload: '<path d="M12 16V4M7 9l5-5 5 5M4 20h16"/>',
+  text: '<path d="M5 6h14M5 11h14M5 16h9"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+};
+const icon = (n, s = 18) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
+
+/* ---------------- charts ---------------- */
+function donut(segs, center, sub, size = 96) {
+  const r = 38, c = 2 * Math.PI * r;
+  let off = 0;
+  const arcs = segs.filter((s) => s.v > 0).map((s) => {
+    const len = Math.min(1, s.v) * c;
+    const el = `<circle r="${r}" cx="50" cy="50" fill="none" stroke="${s.c}" stroke-width="12" stroke-dasharray="${len} ${c - len}" stroke-dashoffset="${-off}" transform="rotate(-90 50 50)"/>`;
+    off += len;
+    return el;
+  }).join("");
+  return `<svg class="donut" width="${size}" height="${size}" viewBox="0 0 100 100" role="img" aria-label="${esc(center)} ${esc(sub || "")}">
+    <circle r="${r}" cx="50" cy="50" fill="none" stroke="var(--line-2)" stroke-width="12"/>${arcs}
+    <text x="50" y="${sub ? 50 : 55}" text-anchor="middle" font-size="19" font-weight="700" fill="var(--ink)">${esc(center)}</text>
+    ${sub ? `<text x="50" y="65" text-anchor="middle" font-size="9.5" fill="var(--ink-3)">${esc(sub)}</text>` : ""}</svg>`;
+}
+const C = { ai: "#7b4bd6", identical: "#d23b3b", minor: "#e07b1f", para: "#c49a00", ok: "#1d8a55" };
+function scoreChip(v, kind) {
+  if (v === null || v === undefined) return '<span class="mini none">not scanned</span>';
+  if (v === "sample") return '<span class="mini none">sample</span>';
+  const p = Math.round(v), col = kind === "ai" ? C.ai : C.identical;
+  return `<span class="mini"><span class="minibar"><i style="width:${Math.max(2, p)}%;background:${col}"></i></span>${p}%</span>`;
+}
+
+/* ---------------- boot & routing ---------------- */
 async function boot() {
   S.status = await D.status();
-  renderChips();
   try { S.me = await D.me(); } catch { S.me = null; }
   D.sb.auth.onAuthStateChange(async (ev) => { if (ev === "SIGNED_IN" && !S.me) { S.me = await D.me(); route(); } });
   route();
 }
 window.addEventListener("hashchange", route);
-$("#brand").onclick = () => go("/");
-$("#logout").onclick = async () => { await D.signOut(); S.me = null; go("/"); };
 function go(path) { if (location.hash === "#" + path) route(); else location.hash = path; }
+function page() {
+  const h = location.hash.replace(/^#/, "") || "/";
+  const m = h.match(/^\/doc\/([a-f0-9-]+)/);
+  if (m) return { name: "doc", id: m[1] };
+  return { name: { "/": "new", "/scans": "scans", "/plans": "plans", "/profile": "profile", "/support": "support" }[h] || "new" };
+}
 function route() {
   clearTimeout(S.poll);
   if (!S.me) return renderAuth();
-  $("#userBox").classList.remove("hidden");
-  $("#credits").textContent = `${S.me.credits} credits`;
-  $("#email").textContent = S.me.email;
-  const m = location.hash.match(/^#\/doc\/([a-f0-9-]+)/);
-  if (m) openDoc(m[1]); else renderDash();
+  const p = page();
+  shell(p.name);
+  if (p.name === "doc") return openDoc(p.id);
+  ({ new: renderNew, scans: renderScans, plans: renderPlans, profile: renderProfile, support: renderSupport })[p.name]();
 }
-function renderChips() {
-  const st = S.status;
-  const c = (label, mode, title) => `<span class="chip ${mode}" title="${esc(title)}">${label}: ${mode}</span>`;
-  $("#provChips").innerHTML =
-    c(st.copyleaks === "sample" ? "Detector" : (st.detector || "Copyleaks"), st.copyleaks, st.copyleaks === "sample" ? "No detector key: findings are SAMPLE data, not detection." : st.copyleaks === "sandbox" ? "Sandbox returns mock results for free testing." : `Live detection by ${st.detector || "Copyleaks"}`) + " " +
-    c("Claude", st.claude, st.claude === "sample" ? "No Anthropic key: rewrites return the text unchanged." : `Model ${st.claude_model}`) + " " +
-    (st.unreachable ? '<span class="chip sample" title="Could not reach the Verity server functions">offline</span> ' : "");
+
+/* ---------------- shell ---------------- */
+function initials() {
+  const n = (S.me.full_name || S.me.email || "?").trim();
+  const parts = n.split(/[\s@._-]+/).filter(Boolean);
+  return ((parts[0] || "?")[0] + (parts[1] ? parts[1][0] : "")).toUpperCase();
 }
+function shell(active) {
+  if (!$("#shell")) root.innerHTML = `<div class="shell" id="shell"><aside class="side" id="side"></aside><main class="main" id="main"></main></div>`;
+  $("#shell").classList.toggle("rail", active === "doc");
+  const st = S.status || {};
+  const credits = S.me.credits ?? 0;
+  const nav = [["new", "/", "plus", "New scan"], ["scans", "/scans", "files", "My documents"], ["plans", "/plans", "plans", "Plans & credits"], ["profile", "/profile", "user", "Profile"], ["support", "/support", "help", "Support"]];
+  $("#side").innerHTML = `
+    <div class="brandrow"><a class="brand" href="#/"><span class="logo">V</span><span class="lbl">Verity AI</span></a>
+      <button class="iconbtn railtoggle" id="railToggle" title="Expand or collapse the menu">${icon("menu")}</button></div>
+    <nav class="nav">${nav.map(([k, h, ic, l]) => `<a href="#${h}" class="${active === k || (k === "scans" && active === "doc") ? "on" : ""}" title="${l}">${icon(ic)}<span class="lbl">${l}</span></a>`).join("")}</nav>
+    <div class="spacer"></div>
+    <div class="creditcard lbl-block">
+      <div class="k">Credits</div>
+      <div class="v">${credits}</div>
+      <div class="bar"><i style="width:${Math.min(100, (credits / ({ student: 80, pro: 220 }[S.me.plan] || 25)) * 100)}%"></i></div>
+      <div class="s">AI check: 1 credit per ${WORDS_PER_CREDIT} words</div>
+      <a href="#/plans" class="btn small">Get more credits</a>
+    </div>
+    <div class="provs lbl-block">
+      <span class="dot ${st.copyleaks === "live" ? "live" : st.copyleaks === "sandbox" ? "warn" : ""}"></span>${esc(st.copyleaks === "sample" ? "Detector: sample mode" : `${st.detector || "Detector"}: ${st.copyleaks}`)}<br>
+      <span class="dot ${st.claude === "live" ? "live" : ""}"></span>${st.claude === "live" ? "Claude rewrites: live" : "Claude: sample mode"}
+    </div>
+    <div class="userrow"><a href="#/profile" class="avatar" title="Profile">${esc(initials())}</a>
+      <div class="lbl who"><div class="n">${esc(S.me.full_name || "Your account")}</div><div class="e">${esc(S.me.email)}</div></div>
+      <button class="iconbtn lbl" id="logout" title="Log out">${icon("out")}</button></div>`;
+  $("#logout") && ($("#logout").onclick = async () => { await D.signOut(); S.me = null; root.innerHTML = ""; go("/"); });
+  $("#railToggle").onclick = () => $("#shell").classList.toggle("rail");
+  app = $("#main");
+}
+function refreshSide() { shell(page().name); }
 
 /* ---------------- auth ---------------- */
 function renderAuth(mode = "login") {
-  $("#userBox").classList.add("hidden");
-  app.innerHTML = `<div class="auth">
-    <h1>${mode === "login" ? "Log in" : "Create account"}</h1>
-    <p>Check Word and PowerPoint files for AI writing and plagiarism, then fix only the flagged passages. Everything else in your file stays exactly the same.</p>
-    <div class="field"><label>Email</label><input id="em" type="email" autocomplete="email"></div>
-    <div class="field"><label>Password (8+ characters)</label><input id="pw" type="password" autocomplete="${mode === "login" ? "current-password" : "new-password"}"></div>
-    <div class="err" id="aerr"></div>
-    <button class="btn primary" id="go" style="width:100%;justify-content:center">${mode === "login" ? "Log in" : "Create account"}</button>
-    <p style="margin:14px 0 0;font-size:13px">${mode === "login" ? 'No account? <a href="#" id="sw">Create one</a>' : 'Have an account? <a href="#" id="sw">Log in</a>'}</p>
-  </div>`;
+  app = root;
+  root.innerHTML = `<div class="authwrap">
+    <section class="authbrand">
+      <div class="brand"><span class="logo">V</span>Verity AI</div>
+      <h1>Check your work. Fix only what is flagged.</h1>
+      <ul>
+        <li><strong>AI writing and plagiarism report</strong> with sources, scores and the exact passages.</li>
+        <li><strong>One-click fixes</strong> inside your Word or PowerPoint file. Citations, links and formatting stay intact.</li>
+        <li><strong>Every other paragraph and slide stays byte for byte the same,</strong> and every change can be undone.</li>
+      </ul>
+      <p class="fine">AI detection is a signal, not proof. Verity helps you review and improve your own writing.</p>
+    </section>
+    <section class="authform">
+      <h2>${mode === "login" ? "Welcome back" : "Create your account"}</h2>
+      <p class="note">${mode === "login" ? "Log in to see your documents and reports." : "Free account with 25 credits to try it."}</p>
+      <div class="field"><label>Email</label><input id="em" type="email" autocomplete="email"></div>
+      <div class="field"><label>Password (8+ characters)</label><input id="pw" type="password" autocomplete="${mode === "login" ? "current-password" : "new-password"}"></div>
+      <div class="err" id="aerr"></div>
+      <button class="btn primary big" id="go">${mode === "login" ? "Log in" : "Create account"}</button>
+      <p class="switch">${mode === "login" ? 'No account? <a href="#" id="sw">Create one</a>' : 'Have an account? <a href="#" id="sw">Log in</a>'}</p>
+    </section></div>`;
   $("#sw").onclick = (e) => { e.preventDefault(); renderAuth(mode === "login" ? "register" : "login"); };
   const submit = async () => {
     try {
@@ -88,6 +171,7 @@ function renderAuth(mode = "login") {
         if (r.needsConfirm) { $("#aerr").style.color = "var(--ok)"; $("#aerr").textContent = "Check your inbox and click the confirmation link, then log in."; return; }
       }
       S.me = await D.me();
+      root.innerHTML = "";
       route();
     } catch (e) { $("#aerr").textContent = e.message; }
   };
@@ -95,37 +179,211 @@ function renderAuth(mode = "login") {
   $("#pw").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
 }
 
-/* ---------------- dashboard ---------------- */
-async function renderDash() {
-  const docs = await guarded(() => D.listDocs()) || [];
-  app.innerHTML = `<div class="dash">
-    <div class="drop" id="drop"><strong>Drop a .docx or .pptx here</strong> or click to choose a file<br><span class="note">Up to 25 MB. Your original file is kept unchanged; every fix creates a new version.</span>
-      <input type="file" id="file" accept=".docx,.pptx" class="hidden"></div>
-    <p class="note" style="margin:-14px 0 22px">No file at hand? Try <a href="samples/sample-thesis.docx" download>a sample thesis (.docx)</a> or <a href="samples/sample-deck.pptx" download>a sample deck (.pptx)</a>.</p>
-    <h2>Your documents</h2>
-    ${docs.length ? `<table class="list"><thead><tr><th>Name</th><th>Type</th><th>Words</th><th>Pages / slides</th><th>Version</th><th>Open findings</th><th>Uploaded</th><th></th></tr></thead><tbody>
-      ${docs.map((d) => `<tr class="row" data-id="${d.id}"><td>${esc(d.name)}</td><td><span class="fmt">${d.format.toUpperCase()}</span></td><td>${d.stats.words.toLocaleString()}</td>
-        <td>${d.stats.locations} ${d.stats.location_label}${d.stats.locations === 1 ? "" : "s"}${d.format === "docx" ? " (approx.)" : ""}</td><td>v${d.version}</td><td>${d.open_findings}</td>
-        <td>${new Date(d.created_at).toLocaleDateString()}</td><td><button class="btn ghost small" data-del="${d.id}" title="Delete document and all versions">Delete</button></td></tr>`).join("")}
-    </tbody></table>` : `<div class="empty">No documents yet. Upload a thesis, paper or slide deck to start.</div>`}
-  </div>`;
-  const drop = $("#drop"), file = $("#file");
-  drop.onclick = () => file.click();
-  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
-  drop.ondragleave = () => drop.classList.remove("over");
-  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) doUpload(e.dataTransfer.files[0]); };
-  file.onchange = () => file.files[0] && doUpload(file.files[0]);
+/* ---------------- shared page bits ---------------- */
+const pageHead = (title, sub, right = "") => `<header class="phead"><div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ""}</div><div class="pactions">${right}</div></header>`;
+function docRow(d) {
+  return `<tr class="row" data-id="${d.id}">
+    <td><div class="docname"><span class="fmt ${d.format}">${d.format.toUpperCase()}</span><div><div class="t">${esc(d.name)}</div><div class="note">${d.stats.words.toLocaleString()} words · ${d.stats.locations} ${d.stats.location_label}${d.stats.locations === 1 ? "" : "s"} · v${d.version}</div></div></div></td>
+    <td>${scoreChip(d.ai, "ai")}</td><td>${scoreChip(d.sim, "sim")}</td>
+    <td>${d.open_findings ? `<span class="pill warn">${d.open_findings} open</span>` : d.scanned ? '<span class="pill ok">clear</span>' : '<span class="pill">not scanned</span>'}</td>
+    <td class="note">${new Date(d.created_at).toLocaleDateString()}</td>
+    <td class="acts"><button class="btn ghost small" data-del="${d.id}" title="Delete document and all versions">Delete</button></td></tr>`;
+}
+function bindDocRows(after) {
   app.querySelectorAll("tr.row").forEach((tr) => (tr.onclick = (e) => { if (!e.target.closest("[data-del]")) go(`/doc/${tr.dataset.id}`); }));
   app.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
     if (!confirm("Delete this document and every version? This cannot be undone.")) return;
-    await guarded(() => D.deleteDoc(b.dataset.del)); toast("Document deleted."); renderDash();
+    await guarded(() => D.deleteDoc(b.dataset.del)); toast("Document deleted."); after();
   }));
+}
+const docTable = (docs) => `<table class="list"><thead><tr><th>Document</th><th>AI content</th><th>Similarity</th><th>Status</th><th>Uploaded</th><th></th></tr></thead><tbody>${docs.map(docRow).join("")}</tbody></table>`;
+
+/* ---------------- new scan ---------------- */
+async function renderNew() {
+  const kinds = S.scanKinds;
+  app.innerHTML = `<div class="pg">
+    ${pageHead("New scan", "Upload a Word or PowerPoint file, or paste text. You get an AI-writing and plagiarism report, then fix only what is flagged.")}
+    <section class="card scanbox">
+      <div class="tabs2">
+        <button data-t="file" class="${S.newTab === "file" ? "on" : ""}">${icon("upload", 16)} Upload file</button>
+        <button data-t="text" class="${S.newTab === "text" ? "on" : ""}">${icon("text", 16)} Paste text</button>
+      </div>
+      <div id="newBody">${S.newTab === "file" ? `
+        <div class="drop" id="drop">${icon("upload", 34)}<strong>Drop a .docx or .pptx here</strong><span>or click to choose a file · up to 25 MB</span>
+          <input type="file" id="file" accept=".docx,.pptx" class="hidden"></div>
+        <p class="note center">Your original file is never changed. Every fix creates a new version you can download or undo. No file at hand? Try <a href="samples/sample-thesis.docx" download>a sample thesis</a> or <a href="samples/sample-deck.pptx" download>a sample deck</a>.</p>` : `
+        <div class="field"><label>Title</label><input id="ptitle" placeholder="e.g. Essay draft, Chapter 2" maxlength="80"></div>
+        <div class="field"><label>Text</label><textarea id="ptext" class="paste" placeholder="Paste your text here (at least 60 words for a reliable AI check)"></textarea></div>
+        <div class="pastefoot"><span class="note" id="pcount">0 words</span><button class="btn primary" id="pgo">Scan text</button></div>
+        <p class="note">Pasted text is saved as a Word document, so you can fix it with the same tools and download or copy the result.</p>`}
+      </div>
+      <div class="scanopts">
+        <span class="note">Check for:</span>
+        <label class="check"><input type="checkbox" id="kAi" ${kinds.ai ? "checked" : ""}> AI writing</label>
+        <label class="check"><input type="checkbox" id="kPl" ${kinds.plagiarism ? "checked" : ""}> Plagiarism</label>
+        <span class="note" id="costNote">Cost per ${WORDS_PER_CREDIT} words: AI 1 credit, plagiarism 2 credits</span>
+      </div>
+    </section>
+    <section class="recent"><div class="sechead"><h2>Recent scans</h2><a href="#/scans">View all</a></div><div id="recentBody"><div class="empty"><span class="spin"></span></div></div></section>
+  </div>`;
+  app.querySelectorAll(".tabs2 button").forEach((b) => (b.onclick = () => { S.newTab = b.dataset.t; renderNew(); }));
+  $("#kAi").onchange = (e) => (S.scanKinds.ai = e.target.checked);
+  $("#kPl").onchange = (e) => (S.scanKinds.plagiarism = e.target.checked);
+  if (S.newTab === "file") {
+    const drop = $("#drop"), file = $("#file");
+    drop.onclick = () => file.click();
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+    drop.ondragleave = () => drop.classList.remove("over");
+    drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) doUpload(e.dataTransfer.files[0]); };
+    file.onchange = () => file.files[0] && doUpload(file.files[0]);
+  } else {
+    const t = $("#ptext"), count = () => { const n = t.value.split(/\s+/).filter(Boolean).length; const u = Math.max(1, Math.ceil(n / WORDS_PER_CREDIT)); $("#pcount").textContent = `${n.toLocaleString()} words · ${u * ((S.scanKinds.ai ? 1 : 0) + (S.scanKinds.plagiarism ? 2 : 0))} credits with the checks selected`; };
+    t.oninput = count;
+    $("#pgo").onclick = async () => {
+      const text = t.value.trim();
+      if (text.split(/\s+/).length < 20) return toast("Paste at least 20 words.", true);
+      $("#pgo").innerHTML = '<span class="spin"></span> Preparing...';
+      const file = await D.textToDocx($("#ptitle").value.trim() || "Pasted text", text);
+      doUpload(file);
+    };
+  }
+  const docs = await guarded(() => D.listDocs()) || [];
+  const rb = $("#recentBody");
+  if (!rb) return;
+  rb.innerHTML = docs.length ? docTable(docs.slice(0, 5)) : '<div class="empty">Nothing scanned yet. Your documents will appear here.</div>';
+  bindDocRows(renderNew);
 }
 async function doUpload(f) {
   const drop = $("#drop");
-  drop.innerHTML = `<span class="spin"></span> Uploading and reading ${esc(f.name)}...`;
+  if (drop) drop.innerHTML = `<span class="spin"></span> Uploading and reading ${esc(f.name)}...`;
   const d = await guarded(() => D.upload(f));
-  if (d) go(`/doc/${d.id}`); else renderDash();
+  if (!d) return renderNew();
+  const kinds = Object.entries(S.scanKinds).filter(([, v]) => v).map(([k]) => k);
+  S.autoScan = kinds.length ? kinds : null;
+  go(`/doc/${d.id}`);
+}
+
+/* ---------------- my documents ---------------- */
+async function renderScans() {
+  app.innerHTML = `<div class="pg">${pageHead("My documents", "Every file you have checked, with its latest scores.", `<a class="btn primary" href="#/">${icon("plus", 16)} New scan</a>`)}
+    <div class="toolbar"><input id="q" class="search" placeholder="Search documents"></div>
+    <div id="docsBody"><div class="empty"><span class="spin"></span></div></div></div>`;
+  const docs = await guarded(() => D.listDocs()) || [];
+  const draw = () => {
+    const q = ($("#q").value || "").toLowerCase();
+    const list = docs.filter((d) => d.name.toLowerCase().includes(q));
+    $("#docsBody").innerHTML = list.length ? docTable(list) : `<div class="empty">${docs.length ? "No documents match your search." : 'No documents yet. <a href="#/">Start a new scan</a>.'}</div>`;
+    bindDocRows(renderScans);
+  };
+  $("#q").oninput = draw;
+  draw();
+}
+
+/* ---------------- profile ---------------- */
+async function renderProfile() {
+  app.innerHTML = `<div class="pg"><div class="empty"><span class="spin"></span></div></div>`;
+  const [usage, docs] = await Promise.all([guarded(() => D.usage()), guarded(() => D.listDocs())]);
+  const me = S.me;
+  const scansDone = (usage || []).filter((u) => u.action.startsWith("scan")).length;
+  const levels = ["", "Bachelor", "Master", "PhD / doctoral", "School", "Professional", "Other"];
+  app.innerHTML = `<div class="pg">${pageHead("Profile", "Your details, credits and activity.")}
+    <div class="grid2">
+      <section class="card">
+        <div class="profhead"><span class="avatar big">${esc(initials())}</span><div><h3>${esc(me.full_name || "Add your name")}</h3><div class="note">${esc(me.email)} · member since ${new Date(me.created_at).toLocaleDateString()}</div></div></div>
+        <div class="formgrid">
+          <div class="field"><label>Full name</label><input id="fName" value="${esc(me.full_name)}" maxlength="120"></div>
+          <div class="field"><label>University or school</label><input id="fUni" value="${esc(me.university)}" maxlength="160"></div>
+          <div class="field"><label>Study level</label><select id="fLevel">${levels.map((l) => `<option ${me.study_level === l ? "selected" : ""} value="${esc(l)}">${l || "Choose"}</option>`).join("")}</select></div>
+          <div class="field"><label>Country</label><input id="fCountry" value="${esc(me.country)}" maxlength="80"></div>
+        </div>
+        <button class="btn primary" id="saveProf">Save details</button>
+      </section>
+      <section class="card">
+        <h3>Plan and credits</h3>
+        <div class="statrow"><div><div class="k">Plan</div><div class="v">${esc((me.plan || "free").replace(/^./, (c) => c.toUpperCase()))}</div></div>
+          <div><div class="k">Credits left</div><div class="v">${me.credits}</div></div>
+          <div><div class="k">Documents</div><div class="v">${(docs || []).length}</div></div>
+          <div><div class="k">Scans run</div><div class="v">${scansDone}</div></div></div>
+        <a href="#/plans" class="btn">See plans</a>
+        <h3 class="mt">Privacy</h3>
+        <p class="note">${me.consent_external_ai ? "You agreed that document text may be sent to the detection provider and Anthropic Claude for analysis and rewrites." : "You have not yet agreed to send text to external providers. You will be asked before your first scan."} Your documents are never used to train models.</p>
+      </section>
+      <section class="card">
+        <h3>Change password</h3>
+        <div class="field"><label>New password (8+ characters)</label><input id="np" type="password" autocomplete="new-password"></div>
+        <button class="btn" id="savePw">Update password</button>
+      </section>
+      <section class="card">
+        <h3>Recent activity</h3>
+        ${(usage || []).length ? `<table class="list compact"><thead><tr><th>When</th><th>What</th><th>Words</th><th>Credits</th></tr></thead><tbody>
+          ${usage.slice(0, 12).map((u) => `<tr><td class="note">${new Date(u.created_at).toLocaleString()}</td><td>${esc(u.action.replace("scan:", "Scan: ").replace("refund:failed-scan", "Refund (failed check)").replace("rewrite", "AI rewrite").replace("+", " + "))}</td><td>${u.words ? u.words.toLocaleString() : ""}</td><td>${u.credits ? (u.credits > 0 ? "-" + u.credits : "+" + -u.credits) : ""}</td></tr>`).join("")}
+        </tbody></table>` : '<p class="note">No activity yet.</p>'}
+      </section>
+      <section class="card danger">
+        <h3>Delete my documents</h3>
+        <p class="note">Removes every document, version and report from Verity. Your account stays. This cannot be undone.</p>
+        <button class="btn" id="delAll">Delete all documents</button>
+      </section>
+    </div></div>`;
+  $("#saveProf").onclick = async () => {
+    const ok = await guarded(() => D.updateProfile({ full_name: $("#fName").value.trim(), university: $("#fUni").value.trim(), study_level: $("#fLevel").value, country: $("#fCountry").value.trim() }));
+    if (ok !== undefined) { S.me = await D.me(); toast("Details saved."); refreshSide(); renderProfile(); }
+  };
+  $("#savePw").onclick = async () => {
+    const pw = $("#np").value;
+    if (pw.length < 8) return toast("Use at least 8 characters.", true);
+    const ok = await guarded(() => D.changePassword(pw));
+    if (ok !== undefined) { $("#np").value = ""; toast("Password updated."); }
+  };
+  $("#delAll").onclick = async () => {
+    if (!confirm("Delete ALL your documents, versions and reports? This cannot be undone.")) return;
+    for (const d of docs || []) await guarded(() => D.deleteDoc(d.id));
+    toast("All documents deleted."); renderProfile();
+  };
+}
+
+/* ---------------- plans ---------------- */
+function renderPlans() {
+  const mail = (plan) => `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(`Verity ${plan} plan`)}&body=${encodeURIComponent(`Hi, I would like the ${plan} plan for ${S.me.email}.`)}`;
+  const plans = [
+    { name: "Free", price: "€0", per: "", credits: "25 credits to try", words: "about 6,000 words of AI checks", items: ["AI writing report", "Plagiarism report with sources", "Fix with AI and manual edits", "Download every version"], cta: `<span class="btn" disabled>${(S.me.plan || "free") === "free" ? "Your current plan" : "Free"}</span>` },
+    { name: "Student", price: "€4.99", per: "/ month", credits: "80 credits every month", words: "about 20,000 words of AI checks, or 6,600 words with AI + plagiarism", items: ["Everything in Free", "Monthly credit refill", "Priority processing", "Email support"], cta: `<a class="btn primary" href="${mail("Student")}">Request Student plan</a>`, hl: true },
+    { name: "Pro", price: "€12.99", per: "/ month", credits: "220 credits every month", words: "about 55,000 words of AI checks, or 18,000 words with AI + plagiarism", items: ["Everything in Student", "Large theses and decks", "Bulk fixes across documents", "Faster support"], cta: `<a class="btn" href="${mail("Pro")}">Request Pro plan</a>` },
+  ];
+  app.innerHTML = `<div class="pg">${pageHead("Plans & credits", "Pay for what you check. Per 250 words: AI check 1 credit, plagiarism check 2 credits. Fixes are free.")}
+    <div class="plans">${plans.map((p) => `<section class="card plan ${p.hl ? "hl" : ""}">
+      ${p.hl ? '<span class="tag">Most popular</span>' : ""}
+      <h3>${p.name}</h3><div class="price">${p.price}<span>${p.per}</span></div>
+      <div class="cred">${p.credits}</div><div class="note">${p.words}</div>
+      <ul>${p.items.map((i) => `<li>${i}</li>`).join("")}</ul>${p.cta}</section>`).join("")}</div>
+    <section class="card">
+      <h3>How credits work</h3>
+      <div class="statrow"><div><div class="k">AI check, 2,500-word essay</div><div class="v">10 credits</div></div>
+        <div><div class="k">AI + plagiarism, same essay</div><div class="v">30 credits</div></div>
+        <div><div class="k">Fix with AI</div><div class="v">free</div></div>
+        <div><div class="k">Failed check</div><div class="v">refunded</div></div></div>
+      <p class="note">Online payment is being set up. Until then, request a plan by email and it is activated on your account by hand.</p>
+    </section></div>`;
+}
+
+/* ---------------- support ---------------- */
+function renderSupport() {
+  const faq = [
+    ["Is an AI score proof that I used AI?", "No. AI detection is probabilistic. Formal, technical, translated and non-native writing is often flagged wrongly. Use the report to review your text, not as a verdict."],
+    ["Does Verity change anything else in my file?", "No. A fix replaces only the selected passage. Before saving, Verity checks that every other paragraph, slide, image, table, header and footer is unchanged, and refuses the edit if not. Every change is a new version you can undo."],
+    ["Are my citations kept?", "Yes. Citations (including Zotero, Mendeley and EndNote fields), links, direct quotes and bold or italic terms are protected and put back exactly as they were."],
+    ["What does plagiarism mean here?", "Similarity with sources on the web. Quoted and cited material and common phrases can also match. For each match you see the source and whether a quote or citation is nearby."],
+    ["Which files work?", "Word (.docx) and PowerPoint (.pptx), up to 25 MB, or pasted text. For a PDF, save it as .docx first."],
+    ["Who sees my documents?", "Only you. Text is sent to the detection provider and to Anthropic Claude to run checks and rewrites, and is never used to train models. You can delete documents at any time from your profile."],
+    ["How do credits work?", "Per 250 words, an AI check costs 1 credit and a plagiarism check costs 2 credits. Fixes are free. If a check fails, its credits are refunded automatically."],
+  ];
+  app.innerHTML = `<div class="pg">${pageHead("Support", "Answers to common questions, and how to reach us.")}
+    <div class="grid2 wide">
+      <section class="card faq">${faq.map(([q, a]) => `<details><summary>${q}</summary><p>${a}</p></details>`).join("")}</section>
+      <section class="card"><h3>Contact</h3><p class="note">Questions, a bug, or a plan request? Email us and include the document name if it is about a report.</p>
+        <a class="btn primary" href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("Verity support")}">Email support</a>
+        <h3 class="mt">Status</h3><p class="note">Detection: ${esc(S.status?.detector || "sample mode")} (${esc(S.status?.copyleaks || "sample")})<br>Rewrites: Claude (${esc(S.status?.claude || "sample")})</p></section>
+    </div></div>`;
 }
 
 /* ---------------- workspace ---------------- */
@@ -136,6 +394,7 @@ async function openDoc(id, keep) {
   if (!rep) return;
   S.report = rep;
   renderWS();
+  if (S.autoScan) { const k = S.autoScan; S.autoScan = null; return startScan(k); }
   const active = Object.values(rep.scans).some((s) => ["queued", "running", "submitted", "exporting"].includes(s.status));
   clearTimeout(S.poll);
   if (active) S.poll = setTimeout(() => location.hash.includes(id) && openDoc(id, true), 4000);
@@ -159,19 +418,24 @@ function renderWS() {
   const st = r.version.stats;
   app.innerHTML = `<div class="ws">
     <div class="ws-head">
-      <button class="btn ghost small" id="back">All documents</button>
+      <button class="btn ghost small" id="back">My documents</button>
       <span class="title" title="${esc(r.document.name)}">${esc(r.document.name)}</span>
       <span class="badge">v${r.version.number}</span>
       <span class="badge">${st.words.toLocaleString()} words</span>
       <span class="badge">${st.locations} ${st.location_label}s${r.document.format === "docx" ? " (approx.)" : ""}</span>
       <span class="badge">${esc(st.language).toUpperCase()}</span>
       <div class="spacer"></div>
+      <button class="btn" id="histBtn">History</button>
+      <button class="btn" id="copyText" title="Copy the current text of the document">Copy text</button>
+      <button class="btn" data-dl="${r.version.id}">Download v${r.version.number}</button>
+    </div>
+    <div class="ws-tools">
+      <span class="note">Scan</span>
       <div class="seg" id="scanSeg"><button data-k="ai,plagiarism">Scan AI + plagiarism</button><button data-k="ai">AI only</button><button data-k="plagiarism">Plagiarism only</button></div>
+      <span class="vsep"></span><span class="note">Fix</span>
       <div class="seg" id="scopeSeg">${["ai", "plagiarism", "both"].map((s) => `<button data-s="${s}" class="${S.fixScope === s ? "on" : ""}">${s === "ai" ? "AI" : s === "plagiarism" ? "Plagiarism" : "Both"}</button>`).join("")}</div>
       <button class="btn accent" id="fixAll">Fix all with AI</button>
       <button class="btn" id="settingsBtn">Fix settings</button>
-      <button class="btn" id="histBtn">History</button>
-      <button class="btn" data-dl="${r.version.id}">Download v${r.version.number}</button>
     </div>
     <div class="summary">${renderSummary()}</div>
     <div class="cols">
@@ -184,21 +448,37 @@ function renderWS() {
 function renderSummary() {
   const r = S.report, ai = r.scans.ai, pl = r.scans.plagiarism;
   const open = F().filter((f) => f.state === "open");
-  const scanState = (s) => !s ? "Not scanned" : s.status === "done" ? (s.mode === "sample" ? "Sample data, no API key" : `${esc(s.provider)} (${s.mode})`) : s.status === "error" ? `Error: ${esc(s.message).slice(0, 80)}` : `<span class="spin"></span> ${esc(s.status)}${s.message ? ": " + esc(s.message) : ""}`;
-  const aiVal = ai && ai.status === "done" ? (ai.mode === "sample" ? "Sample" : pct(ai.summary.ai_share)) : "n/a";
+  const lab = r.version.stats.location_label === "slide" ? "Slide" : "Page";
+  const scanState = (s) => !s ? "Not scanned yet" : s.status === "done" ? (s.mode === "sample" ? "Sample data, no API key" : `${esc(s.provider)}${s.mode === "live" ? "" : " (" + s.mode + ")"}`) : s.status === "error" ? `<span class="errtxt">${esc(s.message).slice(0, 140)}</span>` : `<span class="spin"></span> ${esc(s.status)}${s.message ? ": " + esc(s.message) : ""}`;
+  const aiDone = ai && ai.status === "done" && ai.mode !== "sample" && ai.summary?.ai_share != null;
+  const aiShare = aiDone ? ai.summary.ai_share : null;
   const pls = pl?.summary || {};
-  const plVal = pl && pl.status === "done" ? (pl.mode === "sample" ? "Sample" : `${(pls.identical ?? 0) + (pls.minor_changes ?? 0) + (pls.paraphrased ?? 0)}%`) : "n/a";
+  const plDone = pl && pl.status === "done" && pl.mode !== "sample";
+  const simTotal = plDone ? (pls.aggregated ?? (pls.identical || 0) + (pls.minor_changes || 0) + (pls.paraphrased || 0)) : null;
   const scanned = Math.max(ai?.words || 0, pl?.words || 0);
   const cov = scanned ? Math.min(100, Math.round((100 * scanned) / r.version.stats.words)) : null;
-  return `
-    <div class="metric"><div class="k">AI content</div><div class="v ai">${aiVal}</div><div class="s">${scanState(ai)}</div></div>
-    <div class="metric"><div class="k">Similarity</div><div class="v plag">${plVal}</div><div class="s">${pl && pl.status === "done" && pl.mode !== "sample" ? `Identical ${pls.identical ?? 0}% · Minor ${pls.minor_changes ?? 0}% · Paraphrased ${pls.paraphrased ?? 0}%` : scanState(pl)}</div>
-      ${pl && pl.status === "done" && pl.mode !== "sample" ? `<div class="bars"><i style="width:${pls.identical || 0}%;background:var(--identical)"></i><i style="width:${pls.minor_changes || 0}%;background:var(--minor)"></i><i style="width:${pls.paraphrased || 0}%;background:var(--para)"></i></div>` : ""}</div>
-    <div class="metric"><div class="k">Flagged passages</div><div class="v">${open.length}</div><div class="s">${open.filter((f) => f.type === "ai").length} AI · ${open.filter((f) => f.type === "plagiarism").length} similarity</div></div>
-    <div class="metric"><div class="k">Matched sources</div><div class="v">${r.sources.length}</div><div class="s">${r.sources[0] ? esc(r.sources[0].title).slice(0, 40) : "none"}</div></div>
-    <div class="metric"><div class="k">Need citation</div><div class="v">${open.filter(needsCitation).length}</div><div class="s">${F().filter((f) => f.state === "reviewed").length} reviewed · ${F().filter((f) => f.state === "fixed" || f.state === "fixed_pending").length} fixed</div></div>
-    <div class="metric"><div class="k">Coverage</div><div class="v">${cov === null ? "n/a" : cov + "%"}</div><div class="s">${scanned ? scanned.toLocaleString() + " words scanned" : "Reference list excluded"}</div></div>
-    <div class="warnline"><strong>Read results with care.</strong> AI detection is probabilistic and is not proof of authorship. Formal, technical, non-native and highly standardised academic writing can be flagged wrongly. Similarity is not plagiarism: quoted and cited material and common phrases also match. ${S.status.copyleaks === "sample" ? "<br><strong>Sample mode:</strong> no detector key is set, so findings are placeholders to test the workflow." : ""}${S.status.copyleaks === "sandbox" ? "<br><strong>Copyleaks sandbox:</strong> results are mock data from Copyleaks, not a real detection." : ""}</div>`;
+  const aiOpen = open.filter((f) => f.type === "ai"), plOpen = open.filter((f) => f.type === "plagiarism");
+  const key = open.slice().sort((x, y) => sev(y) - sev(x)).slice(0, 3);
+  function sev(f) { return f.type === "plagiarism" ? ({ identical: 2, minor_changes: 1.6, paraphrased: 1.3 }[f.match_type] || 1.5) + (needsCitation(f) ? 0.5 : 0) : (f.score ?? 0.5) * 2; }
+  return `<div class="sumcards">
+    <div class="sc donutcard">${donut(aiDone ? [{ v: aiShare, c: C.ai }] : [], aiDone ? `${Math.round(aiShare * 100)}%` : ai?.mode === "sample" ? "Sample" : "n/a", "AI")}
+      <div><div class="k">AI content</div><div class="s">${scanState(ai)}</div>
+      <div class="legend"><span><i style="background:${C.ai}"></i>${aiOpen.length} passage${aiOpen.length === 1 ? "" : "s"} flagged</span>${aiDone ? `<span><i style="background:var(--line)"></i>${Math.round((1 - aiShare) * 100)}% likely human</span>` : ""}</div></div></div>
+    <div class="sc donutcard">${donut(plDone ? [{ v: (pls.identical || 0) / 100, c: C.identical }, { v: (pls.minor_changes || 0) / 100, c: C.minor }, { v: (pls.paraphrased || 0) / 100, c: C.para }] : [], plDone ? `${Math.round(simTotal)}%` : pl?.mode === "sample" ? "Sample" : "n/a", "match")}
+      <div><div class="k">Similarity</div><div class="s">${scanState(pl)}</div>
+      ${plDone ? `<div class="legend"><span><i style="background:${C.identical}"></i>Identical ${pls.identical || 0}%</span><span><i style="background:${C.minor}"></i>Minor changes ${pls.minor_changes || 0}%</span>${pls.paraphrased ? `<span><i style="background:${C.para}"></i>Paraphrased ${pls.paraphrased}%</span>` : ""}</div>` : ""}</div></div>
+    <div class="sc statgrid">
+      <div><div class="k">Flagged</div><div class="v">${open.length}</div><div class="s">${aiOpen.length} AI · ${plOpen.length} similarity</div></div>
+      <div><div class="k">Sources</div><div class="v">${r.sources.length}</div><div class="s">${r.sources[0] ? esc(r.sources[0].title).slice(0, 28) : "none"}</div></div>
+      <div><div class="k">Need citation</div><div class="v">${open.filter(needsCitation).length}</div><div class="s">${F().filter((f) => ["fixed", "fixed_pending"].includes(f.state)).length} fixed · ${F().filter((f) => f.state === "reviewed").length} reviewed</div></div>
+      <div><div class="k">Coverage</div><div class="v">${cov === null ? "n/a" : cov + "%"}</div><div class="s">${scanned ? scanned.toLocaleString() + " words" : "references excluded"}</div></div>
+    </div>
+    <div class="sc keypoints"><div class="k">Key points</div>
+      ${key.length ? key.map((f) => `<button class="kp" data-hl="${f.id}"><span class="dotc" style="background:${f.type === "ai" ? C.ai : C.identical}"></span><span><b>${lab} ${f.location} · ${f.type === "ai" ? (f.score != null ? Math.round(f.score * 100) + "% AI" : "AI") : TYPE_LABEL[f.match_type] || "Match"}${needsCitation(f) ? " · no citation" : ""}</b><br>${esc(f.text.slice(0, 90))}${f.text.length > 90 ? "..." : ""}</span></button>`).join("")
+        : `<p class="note">${ai || pl ? "Nothing flagged in the latest scan." : "Run a scan to see the passages that need attention."}</p>`}
+    </div>
+  </div>
+  <details class="warnline"><summary><strong>Read results with care:</strong> AI detection is a signal, not proof.</summary>Formal, technical, non-native and highly standardised academic writing can be flagged wrongly. Similarity is not plagiarism: quoted and cited material and common phrases also match.${S.status.copyleaks === "sample" ? " <strong>Sample mode:</strong> no detector key is set, so findings are placeholders." : ""}</details>`;
 }
 function renderLeft() {
   const r = S.report, n = r.version.stats.locations, label = r.version.stats.location_label;
@@ -411,7 +691,12 @@ function diffHtml(a, b) {
 /* ---------------- actions ---------------- */
 function bindWS() {
   const r = S.report;
-  $("#back").onclick = () => go("/");
+  $("#back").onclick = () => go("/scans");
+  app.querySelectorAll("[data-hl]").forEach((b) => (b.onclick = () => select(b.dataset.hl, true)));
+  $("#copyText").onclick = async () => {
+    const txt = S.report.elements.filter((e) => e.text.trim()).map((e) => e.text).join("\n\n");
+    try { await navigator.clipboard.writeText(txt); toast("Text copied to the clipboard."); } catch { toast("Copy failed. Download the file instead.", true); }
+  };
   bindDownloads();
   app.querySelectorAll("#scanSeg button").forEach((b) => (b.onclick = () => startScan(b.dataset.k.split(","))));
   app.querySelectorAll("#scopeSeg button").forEach((b) => (b.onclick = () => { S.fixScope = b.dataset.s; renderWS(); }));
@@ -494,7 +779,7 @@ async function startScan(kinds) {
   toast(`Scanning: ${kinds.join(" + ")}. AI detection takes a few seconds.`);
   app.querySelectorAll("#scanSeg button").forEach((b) => (b.disabled = true));
   const res = await guarded(() => D.startScan(S.docId, kinds));
-  if (res) { const err = res.find((x) => x.status === "error"); if (err) toast(`${err.kind} scan: ${err.message}`, true); S.me = await D.me(); $("#credits").textContent = `${S.me.credits} credits`; }
+  if (res) { const err = res.find((x) => x.status === "error"); if (err) toast(`${err.kind} scan: ${err.message}`, true); S.me = await D.me(); refreshSide(); }
   openDoc(S.docId, true);
 }
 async function fix(req) {
